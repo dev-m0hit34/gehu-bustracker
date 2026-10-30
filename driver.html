@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GEHU Bus - Driver</title>
+<link rel="stylesheet" href="style.css">
+</head><body>
+<div class="top"><h1>📍 Driver / Tracking Page</h1><small id="busid"></small></div>
+<div class="page">
+  <div id="loginBox" class="card">
+    <b>Driver login</b><br><span class="muted">Use the driver account made in Firebase.</span>
+    <input id="email" type="email" placeholder="Email" autocomplete="username">
+    <input id="pass" type="password" placeholder="Password" autocomplete="current-password">
+    <button id="loginBtn">Log in</button>
+  </div>
+  <button id="startBtn" disabled>▶ Start Tracking</button>
+  <button id="stopBtn" class="stop" disabled>■ Stop Tracking</button>
+  <div class="card">
+    Internet: <b id="net">checking…</b><br>
+    GPS permission: <b id="perm">not asked yet</b><br>
+    Sending updates: <b id="sending">No</b><br>
+    Current position: <b id="pos">–</b><br>
+    Last sent: <b id="sent">–</b>
+  </div>
+  <div id="msg" class="pill warn" style="margin-top:12px">Ready.</div>
+  <p class="muted">Keep this page open and the screen ON. Phones pause GPS when the browser is in the
+  background or the screen is locked.</p>
+</div>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="config.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const say = (t, c) => { $("msg").textContent = t; $("msg").className = "pill " + c; };
+$("busid").textContent = "Bus ID: " + CONFIG.BUS_ID;
+let ref, watchId = null, lastSend = 0, wakeLock = null;
+
+if (!CONFIG.firebase.apiKey) {
+  say("Firebase is not set up yet. Fill config.js", "bad");
+} else {
+  firebase.initializeApp(CONFIG.firebase);
+  const db = firebase.database();
+  ref = db.ref("buses/" + CONFIG.BUS_ID);
+  db.ref(".info/connected").on("value", s => $("net").textContent = s.val() ? "connected" : "DISCONNECTED");
+
+  $("loginBtn").onclick = () => firebase.auth()
+    .signInWithEmailAndPassword($("email").value.trim(), $("pass").value)
+    .catch(e => say("Login failed: " + e.code, "bad"));
+  firebase.auth().onAuthStateChanged(u => {
+    $("loginBox").style.display = u ? "none" : "block";
+    $("startBtn").disabled = !u || watchId !== null;
+    if (u) say("Logged in. Press Start Tracking.", "ok");
+  });
+}
+
+$("startBtn").onclick = async () => {
+  if (!navigator.geolocation) return say("This browser does not support GPS (Geolocation).", "bad");
+  watchId = navigator.geolocation.watchPosition(onPos, onErr,
+    { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+  ref.onDisconnect().update({ active: false });         // if phone loses internet, mark bus inactive
+  $("startBtn").disabled = true; $("stopBtn").disabled = false;
+  say("Asking for GPS… tap Allow.", "warn");
+  try { wakeLock = await navigator.wakeLock.request("screen"); } catch (e) {}  // keep screen on
+};
+
+function onPos(p) {
+  $("perm").textContent = "granted";
+  const { latitude: lat, longitude: lng, accuracy } = p.coords;
+  $("pos").textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)} (±${Math.round(accuracy)} m)`;
+  if (Date.now() - lastSend < CONFIG.SEND_EVERY_MS) return;
+  lastSend = Date.now();
+  ref.set({ lat, lng, accuracy: Math.round(accuracy), ts: Date.now(), active: true })
+    .then(() => {
+      $("sending").textContent = "Yes";
+      $("sent").textContent = new Date().toLocaleTimeString();
+      say("Tracking and sending updates.", "ok");
+    })
+    .catch(e => { $("sending").textContent = "No"; say("Send failed: " + e.message, "bad"); });
+}
+
+function onErr(e) {
+  const text = {
+    1: "Permission denied. Allow location for this site in browser settings, then reload.",
+    2: "Location unavailable. Turn on GPS / check signal.",
+    3: "Location request timed out. Trying again…"
+  };
+  if (e.code === 1) { $("perm").textContent = "denied"; $("sending").textContent = "No"; }
+  say(text[e.code] || e.message, e.code === 3 ? "warn" : "bad");
+}
+
+$("stopBtn").onclick = () => {
+  navigator.geolocation.clearWatch(watchId); watchId = null;
+  if (wakeLock) wakeLock.release();
+  ref.update({ active: false, ts: Date.now() });
+  $("sending").textContent = "No";
+  $("startBtn").disabled = false; $("stopBtn").disabled = true;
+  say("Tracking stopped.", "warn");
+};
+</script></body></html>

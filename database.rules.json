@@ -1,0 +1,19 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "buses": {
+      "$busId": {
+        ".read": true,
+        ".write": "auth != null && auth.uid === 'PASTE_DRIVER_UID_HERE'",
+        ".validate": "newData.hasChildren(['ts', 'active'])",
+        "lat":      { ".validate": "newData.isNumber() && newData.val() >= -90 && newData.val() <= 90" },
+        "lng":      { ".validate": "newData.isNumber() && newData.val() >= -180 && newData.val() <= 180" },
+        "accuracy": { ".validate": "newData.isNumber()" },
+        "ts":       { ".validate": "newData.isNumber()" },
+        "active":   { ".validate": "newData.isBoolean()" },
+        "$other":   { ".validate": false }
+      }
+    }
+  }
+}

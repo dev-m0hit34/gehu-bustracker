@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GEHU Bus Tracker</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head><body>
+<div class="top"><h1>🚌 GEHU Bus Live Tracker</h1><small>Graphic Era Hill University, Dehradun</small></div>
+<div id="map"></div>
+<div class="sheet">
+  <span id="status" class="pill warn">Connecting…</span>
+  <select id="stopSelect"></select>
+  <div class="eta" id="eta">Select your stop</div>
+  <div class="muted" id="etaNote"></div>
+  <div class="muted" style="margin-top:8px">Last update: <b id="last">–</b>
+    · ETA is a rough estimate (no traffic or road data).</div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="config.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const S = CONFIG.STOPS;
+
+// ---------- 1. MAP (OpenStreetMap, attribution is required) ----------
+const map = L.map("map").setView([S[0].lat, S[0].lng], 14);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+
+// ---------- 2. ROUTE AND STOPS ----------
+const line = L.polyline(S.map(s => [s.lat, s.lng]), { color: "#2a6df4", weight: 5, opacity: 0.8 }).addTo(map);
+map.fitBounds(line.getBounds(), { paddingTopLeft: [20, 90], paddingBottomRight: [20, 240] });
+
+const select = $("stopSelect");
+select.innerHTML = '<option value="">— Choose your stop —</option>';
+S.forEach((s, i) => {
+  const icon = L.divIcon({ className: "", html: `<div class="num">${i + 1}</div>`, iconSize: [26, 26] });
+  L.marker([s.lat, s.lng], { icon }).addTo(map).bindPopup(`<b>${s.name}</b>`)
+    .on("click", () => { select.value = i; render(); });
+  select.innerHTML += `<option value="${i}">${i + 1}. ${s.name}</option>`;
+});
+
+if (CONFIG.SHOW_COORDINATE_HELPER) {
+  map.on("click", e => L.popup().setLatLng(e.latlng)
+    .setContent(`lat: ${e.latlng.lat.toFixed(5)}<br>lng: ${e.latlng.lng.toFixed(5)}`).openOn(map));
+}
+
+// ---------- 3. DISTANCE ALONG THE ROUTE ----------
+// Cumulative distance (km) from the first stop to each stop
+const cum = [0];
+for (let i = 0; i < S.length - 1; i++) cum.push(cum[i] + distKm(S[i], S[i + 1]));
+const KX = Math.cos(30.27 * Math.PI / 180) * 111.32, KY = 110.57;   // degrees -> km (near Dehradun)
+const xy = p => ({ x: p.lng * KX, y: p.lat * KY });
+
+// Find the closest point of the route to the bus; return how far along the route it is
+function progressAlongRoute(bus) {
+  const b = xy(bus); let best = { off: Infinity, s: 0 };
+  for (let i = 0; i < S.length - 1; i++) {
+    const a = xy(S[i]), c = xy(S[i + 1]);
+    const dx = c.x - a.x, dy = c.y - a.y;
+    const t = Math.max(0, Math.min(1, ((b.x - a.x) * dx + (b.y - a.y) * dy) / (dx * dx + dy * dy)));
+    const off = Math.hypot(b.x - (a.x + t * dx), b.y - (a.y + t * dy));
+    if (off < best.off) best = { off, s: cum[i] + t * (cum[i + 1] - cum[i]) };
+  }
+  return best;
+}
+
+// ---------- 4. SHOW EVERYTHING ----------
+const busIcon = L.divIcon({ className: "", html: '<div class="bus">🚌</div>', iconSize: [30, 30] });
+let busMarker = null, lastData = null, online = true;
+
+function setStatus(text, cls) { $("status").textContent = text; $("status").className = "pill " + cls; }
+
+function render() {
+  if (!online) setStatus("No internet. Showing last known data.", "bad");
+  else if (!lastData) setStatus("Waiting for the bus to start tracking…", "warn");
+  else if (!lastData.active) setStatus("Tracking is stopped. The bus may not be running.", "warn");
+  else if ((Date.now() - lastData.ts) / 1000 > CONFIG.STALE_SECONDS) setStatus("Location is outdated.", "bad");
+  else setStatus("● Bus is live", "ok");
+
+  if (!lastData) return;
+  const pos = [lastData.lat, lastData.lng];
+  if (!busMarker) busMarker = L.marker(pos, { icon: busIcon, zIndexOffset: 1000 }).addTo(map);
+  else busMarker.setLatLng(pos);
+
+  const sec = Math.max(0, Math.round((Date.now() - lastData.ts) / 1000));
+  $("last").textContent = new Date(lastData.ts).toLocaleTimeString() +
+    (sec < 90 ? ` (${sec}s ago)` : ` (${Math.round(sec / 60)} min ago)`);
+
+  const i = select.value, eta = $("eta"), note = $("etaNote");
+  if (i === "") { eta.textContent = "Select your stop"; note.textContent = ""; return; }
+  const p = progressAlongRoute(lastData), ahead = cum[i] - p.s;
+  if (p.off > 1.5) { eta.textContent = "ETA not available"; note.textContent = "The bus is away from the planned route."; }
+  else if (ahead < -0.15) { eta.textContent = "Bus has passed this stop"; note.textContent = "Or it is on the way back."; }
+  else if (ahead < 0.1) { eta.textContent = "Bus is at this stop"; note.textContent = ""; }
+  else {
+    const km = ahead * CONFIG.ROAD_FACTOR;
+    eta.textContent = "About " + Math.max(1, Math.round(km / CONFIG.AVG_SPEED_KMH * 60)) + " min";
+    note.textContent = `≈ ${km.toFixed(1)} km by road (approximate)`;
+  }
+}
+select.addEventListener("change", render);
+setInterval(render, 1000);                      // keeps "x s ago" and "outdated" fresh
+
+// ---------- 5. LIVE DATA FROM FIREBASE ----------
+if (!CONFIG.firebase.apiKey) {
+  setStatus("Firebase is not set up yet. Fill config.js", "bad");
+} else {
+  firebase.initializeApp(CONFIG.firebase);
+  const db = firebase.database();
+  db.ref("buses/" + CONFIG.BUS_ID).on("value",
+    snap => { if (snap.val()) { lastData = snap.val(); render(); } },
+    err => setStatus("Cannot read data: " + err.message, "bad"));
+  db.ref(".info/connected").on("value", s => { online = s.val() === true; render(); });
+}
+</script></body></html>
